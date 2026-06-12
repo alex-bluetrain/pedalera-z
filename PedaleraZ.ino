@@ -9,7 +9,7 @@
 #include "SevenSegmentFun.h"
 #include "Encoder.h"
 
-const char RELEASE_VERSION[] = "Pedalera-Z v2.0.0 by Alex Verstraeten (alex@okular.com.ar)";
+const char RELEASE_VERSION[] = "Pedalera-Z v2.1.0 by Alex Verstraeten (alex@okular.com.ar)";
 const int sn=808;
 int esn=1234;
 
@@ -39,10 +39,16 @@ int esn=1234;
 
 #define CELDAS_COUNT 3
 HX711 celdas[CELDAS_COUNT] = {
-  HX711(DT1, CLK1),
-  HX711(DT2, CLK2),
-  HX711(DT3, CLK3)
+  HX711(),
+  HX711(),
+  HX711()
 };
+
+char pedals[CELDAS_COUNT] = {'x','y','z'};
+uint8_t fallas[CELDAS_COUNT] = {0, 0, 0};
+
+// cantidad maxima de fallas consecutivas para considerar un error y apagar la celda.
+uint8_t fallas_max = 100;
 
 //                      (hid   type                   btns hat X      Y      Z     RX     RY    RZ   rudder  throtle accel  brake  steer
 Joystick_ joy = Joystick_(0x03, JOYSTICK_TYPE_GAMEPAD, 3,  0,  true, true, true, false, false,  false, false, false, false, false, false);
@@ -136,9 +142,9 @@ struct Calibration {
 };
 
 CalibrationData calib = {
-  false,     // enable
-  false,
-  false,
+  true,     // enable
+  true,
+  true,
   110.2,    // scale
   43.62,
   110.2,
@@ -184,9 +190,7 @@ unsigned int elapsed;
 // filter
 // float ff = 0.5; // factor de filtrado (entre 0:pesado 1:liviano)
 float new_value;
-float values[CELDAS_COUNT] = {
-  0
-};
+float values[CELDAS_COUNT] = {0, 0, 0};
 
 uint16_t x;
 uint16_t y;
@@ -198,15 +202,58 @@ bool output_enabled = false;
 DISPLAY_MODE display_mode = SHOW_DIGITS;
 
 void process_pedal(int pedal) {
-
   // range               = calibration range
   // min_val to max_val  = is the new range after deadzone formula
   // curves              = remaps the value within the deadzoned range
   float dzmin, dzmax, range;
   
+  // handle disabled pedals
+  switch(pedal) {
+    case 0:
+      if (!calib.throttle_enabled) {
+        values[pedal] = 0;
+        joy.setXAxis(0);
+        return;
+      };
+      break;
+    case 1:
+      if (!calib.brake_enabled) {
+        values[pedal] = 0;
+        joy.setYAxis(0);
+        return;
+      };
+      break;
+    case 2:
+      if (!calib.clutch_enabled) {
+        values[pedal] = 0;
+        joy.setZAxis(0);
+        return;
+      };
+      break;                  
+  }
+  
+  // handle read errors
+  bool failed = false;
+  long readout = celdas[pedal].read();
+  if (readout == LONG_MIN) {
+    failed = true;
+    fallas[pedal]++;
+    if (fallas[pedal] >= fallas_max) {
+      Serial.print("failure detected in pedal ");
+      Serial.println(pedals[pedal]);
+//      set_pedal_state(pedal, false);
+      fallas[pedal] = 0;
+    }
+  } else {
+    fallas[pedal] = 0;
+  }
+
+  // if (pedal == 1 && !failed) {
+  //   show_readings_per_second();
+  // }
   switch (pedal) {
     case 0:
-      new_value = celdas[pedal].get_units();
+      new_value = failed ? values[pedal] : (readout - calib.throttle_tare) / calib.throttle_scale;
       values[pedal] += (1-calib.throttle_filter) * (new_value - values[pedal]);
       range = calib.throttle_max - calib.throttle_min;
       dzmin = calib.throttle_min + (range / 100 * calib.throttle_dz_bottom);
@@ -221,7 +268,7 @@ void process_pedal(int pedal) {
       joy.setXAxis(x);
       break;
     case 1:
-      new_value = celdas[pedal].get_units();
+      new_value = failed ? values[pedal] : (readout - calib.brake_tare)/ calib.brake_scale; // convertir a gramos
       values[pedal] += (1-calib.brake_filter) * (new_value - values[pedal]);
       range = calib.brake_max - calib.brake_min;
       dzmin = calib.brake_min + (range / 100 * calib.brake_dz_bottom);
@@ -236,8 +283,8 @@ void process_pedal(int pedal) {
       joy.setYAxis(y);
       break;
     case 2:
-      new_value = celdas[pedal].get_units();
-      values[pedal] += (1-calib.throttle_filter) * (new_value - values[pedal]);
+      new_value = failed ? values[pedal] : (readout - calib.clutch_tare) / calib.clutch_scale; // convertir a gramos
+      values[pedal] += (1-calib.clutch_filter) * (new_value - values[pedal]);
       range = calib.clutch_max - calib.clutch_min;
       dzmin = calib.clutch_min + (range / 100 * calib.clutch_dz_bottom);
       dzmax = calib.clutch_max - (range / 100 * calib.clutch_dz_top);
@@ -263,7 +310,8 @@ void show_readings_per_second() {
   }
   readings++;
   Serial.print(readings_per_second);
-  Serial.print(" ");
+  Serial.print("\n");
+  // displayShow(readings_per_second);
 }
 
 const byte DATA_MAX_SIZE = 32;
@@ -320,6 +368,10 @@ void setup() {
   joy.setYAxisRange(0, 65535);
   joy.setZAxisRange(0, 65535);
 
+  celdas[0].begin(DT1, CLK1);
+  celdas[1].begin(DT2, CLK2);
+  celdas[2].begin(DT3, CLK3);
+
   celdas[0].set_scale(calib.throttle_scale);
   celdas[1].set_scale(calib.brake_scale);
   celdas[2].set_scale(calib.clutch_scale);
@@ -365,10 +417,9 @@ void loop() {
     return;
   }
   // ----sn validation end-------
-  
-  (calib.throttle_enabled) ? process_pedal(0) : joy.setXAxis(0);
-  (calib.brake_enabled)    ? process_pedal(1) : joy.setYAxis(0);
-  (calib.clutch_enabled)   ? process_pedal(2) : joy.setZAxis(0);
+  process_pedal(0);
+  process_pedal(1);
+  process_pedal(2);
   process_buttons();
   
   joy.sendState();
@@ -383,11 +434,11 @@ void loop() {
 void output_axis() {
   if (!output_enabled) return;
   Serial.print("<");
-  Serial.print( calib.throttle_enabled ? values[0] : '0');
+  Serial.print(values[0]);
   Serial.print(" ");
-  Serial.print( calib.brake_enabled ? values[1] : '0');
+  Serial.print(values[1]);
   Serial.print(" ");
-  Serial.print( calib.clutch_enabled ? values[2] : '0');
+  Serial.print(values[2]);
 
   // Serial.print(" ");
   // Serial.print( calib.throttle_enabled ? x : '0');
@@ -673,6 +724,13 @@ void set_pedal_state(char pedal, bool state) {
   else if (pedal == 'z') { calib.clutch_enabled = state; get_pedal_state(pedal); }
 }
 
+void set_pedal_state(int pedal, bool state) {
+  if (pedal <0 || pedal >2) return;
+  if      (pedal == 0) { calib.throttle_enabled = state; get_pedal_state('x'); }
+  else if (pedal == 1) { calib.brake_enabled = state; get_pedal_state('y'); }
+  else if (pedal == 2) { calib.clutch_enabled = state; get_pedal_state('z'); }
+}
+
 void get_pedal_state(char pedal) {
   if (pedal == 'x') {
     Serial.println( (calib.throttle_enabled) ? "state x enabled" : "state x disabled");
@@ -706,12 +764,17 @@ void get_pedal_filter(char pedal) {
 
 void tare_pedal_now(char pedal) {
   long max_value;
-  int samples = 25; // 500ms aprox
+  long current_value;
+  int samples = 25; // 50 samples = 1000 ms aprox
   
   if (pedal == 'x' || pedal == 'a') {
     max_value = LONG_MIN;
-    for (int i=0; i<samples; i++) {
-      max_value = max(max_value, celdas[0].read());
+    if (calib.throttle_enabled) {
+      for (int i=0; i<samples; i++) {
+        max_value = max(max_value, celdas[0].read());
+      }
+    } else {
+      max_value = 0;
     }
     calib.throttle_tare = max_value;
     celdas[0].set_offset(max_value);
@@ -719,8 +782,14 @@ void tare_pedal_now(char pedal) {
   }
   if (pedal == 'y' || pedal == 'a') {
     max_value = LONG_MIN;
-    for (int i=0; i<samples; i++) {
-      max_value = max(max_value, celdas[1].read());
+    if (calib.brake_enabled) {
+      for (int i=0; i<samples; i++) {
+        current_value = celdas[1].read();
+        max_value = max(max_value, current_value);
+        Serial.println(max_value);
+      }
+    } else {
+      max_value = 0;
     }
     calib.brake_tare = max_value;
     celdas[1].set_offset(max_value);
@@ -728,8 +797,12 @@ void tare_pedal_now(char pedal) {
   }
   if (pedal == 'z' || pedal == 'a') {
     max_value = LONG_MIN;
-    for (int i=0; i<samples; i++) {
-      max_value = max(max_value, celdas[2].read());
+    if (calib.clutch_enabled) {
+      for (int i=0; i<samples; i++) {
+        max_value = max(max_value, celdas[2].read());
+      }
+    } else {
+      max_value = 0;
     }
     calib.clutch_tare = max_value;
     celdas[2].set_offset(max_value);
@@ -771,10 +844,11 @@ void get_pedal_tare(char pedal) {
 }
 
 
+// obsoleto, se usa tare y deadzone solamente, forzado a 0
 void set_pedal_min(char pedal, float grams) {
-  if      (pedal == 'x') calib.throttle_min = grams;
-  else if (pedal == 'y') calib.brake_min = grams;
-  else if (pedal == 'z') calib.clutch_min = grams;
+  if      (pedal == 'x') calib.throttle_min = 0;
+  else if (pedal == 'y') calib.brake_min = 0;
+  else if (pedal == 'z') calib.clutch_min = 0;
   get_pedal_min(pedal);
 }
 
@@ -906,7 +980,12 @@ void get_pedal_curve(char pedal) {
 void save_calib() {
   Calibration toEEPROM;
   toEEPROM.data = calib;
-  toEEPROM.crc = crc((uint8_t*)&calib, sizeof(calib));
+  // save all pedal state to enabled 
+//  toEEPROM.data.throttle_enabled = true;
+//  toEEPROM.data.brake_enabled = true;
+//  toEEPROM.data.clutch_enabled = true;
+
+  toEEPROM.crc = crc((uint8_t*)&toEEPROM.data, sizeof(calib));
   EEPROM.put(0, toEEPROM);
   Serial.println("calibration saved");
   display.snake(1);
@@ -929,7 +1008,6 @@ void load_calib() {
   }
 
   // notify the UI (via serial port)
-  char pedals[3] = {'x','y','z'};
   for (int i=0; i<3; i++) {
     get_pedal_curve(pedals[i]);
     get_pedal_dz_bottom(pedals[i]);
