@@ -5,7 +5,7 @@
 Firmware for a **3-pedal sim-racing controller** built around load cells and an Arduino Leonardo. Pedalera-Z reads throttle, brake, and clutch via HX711 amplifiers, exposes them as a USB HID gamepad, and supports per-pedal calibration with EEPROM persistence.
 
 **Current version:** `v2.1.0`  
-**Author:** Alex Verstraeten — [alex@okular.com.ar](mailto:alex@okular.com.ar)
+**Author:** Alex Verstraeten — [averstraeten@gmail.com](mailto:averstraeten@gmail.com)
 
 ---
 
